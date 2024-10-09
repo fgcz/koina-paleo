@@ -1,0 +1,263 @@
+---
+title: "p24073 spectral angle using AlphaPept_ms2_generic"
+author: "Christian Panse <cp@fgcz.ethz.ch>"
+date: "`r date()`"
+output:
+  html_document:
+    toc_float: true
+bibliography: fgcz.bib
+---
+
+To further validate all peptide spectrum matches (PSMs) with a mascot (version 2.7) [@mascot] score below 40, we compared each spectrum with an `AlphaPept_ms_generic` [@alphapept] fragment-ion prediction model using R (version 4.4.1), Bioconductor (version 3.19), and the koinar package [@koina; @bioc.koinar]. The following model parameters were used: QE for Thermo Fischer Scientific (TFS) QExactive mass spectrometer and a normalized collision energy (CE) setting of 28eV. The rawrr package [@rawrr] was used to extract spectral data from the TFS generated raw files. For the CE calibration [@prosit], we predicted fragment ion intensities using the model by iterating over a CE range between 15eV and 36eV, and determined the local maxima of the Pearson correlation of matching peaks from experimental and predicted fragment ions (mass window of 0.1Da).  PSMs with spectral angle Pearson scores of over 0.70 are considered to pass, while the cut-off score for  PSMs with methionine or proline oxidation (Unimod:35)  was 0.60. We chose a lower score for PTMs because the current prediction models have limited prediction power with respect to post-translational modifications. Alphabet is the model considered most capable of predicting PTM fragments at the moment. The mirror plots were generated in plain R (source code: github.com/fgcz/koina-paleo/) with red and blue peaks corresponding to the predicted and experimental fragment ions, respectively.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Required R packages
+
+```{r requiredPackages}
+stopifnot(require(readr),
+          require(httr),
+          require(jsonlite),
+          require(rawrr))
+```
+
+## Input - read PSM information
+
+```{r readInput}
+df <- readr::read_csv("__wilkin_2023_NEW.csv", 
+                     col_types = cols(scan = col_integer(), 
+                                      charge = col_integer(), SpectrumID = col_integer()))
+
+df[1:3,] -> df.psm
+```
+
+```{r printInput}
+knitr::kable(df, row.names = T)
+```
+
+
+
+```{r configKoinaRpkg}
+koina_AlphaPept_ms2_generic <- koinar::Koina$new(
+  # model_name = "Prosit_2020_intensity_HCD",
+  model_name = "AlphaPept_ms2_generic",
+  # server_url = "dlomix.fgcz.uzh.ch:443",
+  ssl = TRUE
+)
+
+n <- nrow(df.psm)
+input <- list(
+  peptide_sequences = array(df.psm$sequence,
+                            dim = c(n, 1)),
+  collision_energies = array(rep(35, n), dim = c(n, 1)),
+  precursor_charges = array(df.psm$charge, dim = c(n, 1)),
+  instrument_types = array(rep("QE", n), dim = c(n,1))
+)
+
+koina_AlphaPept_ms2_generic$predict(input,
+                                    pred_as_df = FALSE) -> rv_AlphaPept_ms2_generic
+
+extractKoinaPrediction <- function(p, idx){
+  df <- data.frame(mz = p$mz[idx, ],
+             intensities = p$intensities[idx, ],
+             annotation = p$annotation[idx, ])
+  
+  df[df$intensities > -1, ]
+}
+```
+
+## Predict peptide fragment intensities using koina 
+
+```{r rawrrReadSpectra, eval = FALSE}
+S$rawfile <- paste0(S$file, ".raw", sep = "")
+
+spectra <- lapply(1:n, FUN = function(idx){
+  rf <- S$rawfile[idx]
+  scan <- S$scan[idx]
+  message("Processing ", rf, " scan ", scan, " using rawrr ...")
+ 
+  rawrr::readSpectrum(rf, scan = scan)[[1]]
+})
+save(spectra, S, file = "p24073_spectra.RData")
+```
+
+## Load spectra and input from Rdata file
+
+```{r loadSpectra}
+"p24073_spectra.RData" -> rdafn
+stopifnot(file.exists(rdafn))
+load(rdafn)
+```
+
+```{r someProofOfConcept}
+spectra |> length()
+
+spectra[1]
+
+stopifnot(length(spectra) == nrow(S))
+
+S |> head()
+```
+
+## Define R-Helper functions
+
+Define Determine match between predicted and measured spectra function
+
+```{r defineDetermineMatch, eval=TRUE}
+.determineMatch <- function(s0, s1, plot, massRange){
+  
+  s1 <- s1[s1$mZ>0, ]
+  idx <- order(s1$mZ)
+  s1 <- s1[idx, ]
+  
+  idxNN <- protViz::findNN(q = s1$mZ, s0$mZ)
+  idxHits <- (abs(s1$mZ - s0$mZ[idxNN]) < 0.05) 
+  
+  s1idx <- which(idxHits)
+  s0idx <- idxNN[idxHits]
+  
+  if(plot && length(s0idx) > 0 && length(s1idx) > 0){
+    ## mirror plot
+    plot(s0$mZ, s0$intensity/max(s0$intensity),
+         lwd = 1.25,
+         col = rgb(0.1, 0.1, 0.9, alpha = 0.5),
+         xlim = massRange,
+         ylim = c(-1, 1),
+         type = 'n', 
+         xlab = "m/z",
+         ylab = "Relative Intensities")
+    
+    points(s0$mZ[s0idx], -s0$intensity[s0idx] / max(s0$intensity[s0idx]),
+           type = 'h', col='blue', lwd = 3)
+    
+    points(s1$mZ[s1idx],  s1$intensity[s1idx] / max(s1$intensity[s1idx]),
+           type = 'h', col='red', lwd = 3)
+    
+    axis(3, s1$mZ[s1idx], s1$annotation[s1idx], las = 2, cex.axis = 0.5)
+  }
+  
+  data.frame(pearson = cor(s0$intensity[s0idx], s1$intensity[s1idx], method = "pearson"),
+             spearman = cor(s0$intensity[s0idx], s1$intensity[s1idx], method = "spearman"),
+             nMatches = length(s0idx), 
+             coverage = round(100 * length(s0idx) / length(s1$intensity)))
+  
+}
+```
+
+
+
+```{r defineDetermineCov, fig.retina=3}
+.determineCov <- function(CE, plot = FALSE){
+  n <- length(spectra)
+
+
+  input <- list(
+    peptide_sequences = array(S$sequence,
+                              dim = c(n, 1)),
+    collision_energies = array(rep(CE, n), dim = c(n, 1)),
+    precursor_charges = array(S$charge, dim = c(n, 1)),
+    instrument_types = array(rep("QE", n), dim = c(n,1))
+  )
+  
+  #browser()
+  koina_AlphaPept_ms2_generic$predict(input, pred_as_df = FALSE) -> rv_AlphaPept_ms2_generic
+
+  rv <- lapply(1:n,
+               FUN = function(idx){
+                 # message("idx", idx, " ...")
+                 s <- spectra[[idx]]
+                 
+                 s0 <- data.frame(mZ = s$mZ, intensity = s$intensity / max(s$intensity))
+                 
+                 s1 <- data.frame(mZ = rv_AlphaPept_ms2_generic$mz[idx, ],
+                                  intensity = rv_AlphaPept_ms2_generic$intensities[idx, ], 
+                                  annotation = rv_AlphaPept_ms2_generic$annotation[idx, ])
+
+                 extractKoinaPrediction(rv_AlphaPept_ms2_generic, idx) -> predictedSpectrum
+                 
+                  if (plot){
+                   op <- par(mfrow = c(2, 1))
+                   plot(s, sub = paste(S$sequence[idx],
+                                       "charge", S$charge[idx]))
+                    points(predictedSpectrum$mz, predictedSpectrum$intensities, 
+                          col = rgb(0.9, 0.1, 0.1, alpha = 0.5), type = 'h', lwd = 1.25)
+                    
+                   axis(3, s1$mZ, s1$annotation, las = 2, cex.axis = 0.5)
+                  }
+                 
+                 pc <- .determineMatch(s0, s1, plot = plot, massRange = s$massRange)
+           
+                 if (plot){
+                     legend("topright", c(paste0("pearson  = ", round(pc$pearson,2)),
+                                        paste0("spearman = ", round(pc$spearman,2)),
+                                        paste0("#matches =",  pc$nMatches),
+                                        paste0("coverage in %", pc$coverage)),
+                          cex = 0.5)
+                 }
+                 #data.frame(pearson = pc$pearson, sequence = S$sequence[idx])
+                 pc$sequence <- S$sequence[idx]
+                 pc$rawfile <- S$rawfile[idx]
+                 pc$scan <- S$scan[idx]
+                 pc$charge <- S$charge[idx]
+                 pc$scanId <- S$scan[idx]
+                 
+                 pc
+               })
+  #if (plot) dev.off()
+  rv |> Reduce(f = rbind) -> df
+  df$CE <- CE
+  df
+}
+```
+
+here we generate the mirror plots
+
+```{r determineBestCEBestOf, fig.retina=3, fig.height=8}
+pdf("p24073_spectra.pdf", width = 19/2, height = 12/2)
+.determineCov(CE = 28, plot = TRUE) -> rv
+write.csv(rv, "p24073_spectra_CE28_QE_AlphaPeptGeneric.csv", row.names = FALSE)
+dev.off()
+```
+
+## Perform CE normalization
+
+```{r determineCeNormalization}
+lapply(15:36, FUN = .determineCov) |>
+  Reduce(f = rbind) -> df
+```
+
+```{r boxplotFun, fig.height = 12, fig.retina=3, fig.cap = "CE normalization: TRUE represents specs having an identified sequence containing P[UNIMOD:35].", fig.width=8}
+lattice::bwplot(df$pearson ~ as.character(df$CE) | grepl("P\\[UNIMOD:35", df$sequence),
+                ylab = "median spectral angle (pearson)",
+                xlab = "CE [in eV]",
+                scales=list(y=list(at=seq(0, 1, .05)), x = list(rot = 45)),
+                layout = c(2, 1),
+                horizontal = FALSE)
+
+lattice::bwplot(df$spearman ~ as.character(df$CE) | grepl("P\\[UNIMOD:35", df$sequence),
+                ylab = "median spectral angle (spearmann)",
+                xlab = "CE [in eV]",
+                scales=list(y=list(at=seq(0, 1, .05)), x = list(rot = 45)),
+                layout = c(2, 1),
+                horizontal = FALSE)
+```
+
+
+```{r hist}
+hist(rv$pearson)
+hist(rv$spearman)
+```
+
+# References
+
+<div id="refs"></div>
+
+
+# Session info
+
+```{r sessionInfo}
+sessionInfo()
+```
